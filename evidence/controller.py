@@ -36,6 +36,12 @@ VNE
     ORDER of importance (gap > conflict > challenge > fragile > unverified); the Pareto test is
     what decides whether a step made progress. Ablate them.
 
+Policy (--policy)
+    vne        the default: the legal action with the best VNE is chosen, as above
+    navigator  a frozen LLM chooses among the same legal actions and may write their queries (evidence.navigator).
+               It can end a question only when the certificate is complete, and an invalid reply falls back to the
+               VNE choice. Guards and audit are unchanged: the model proposes, it never accepts evidence or certifies.
+
 Reasoning-pathology monitor (flags go to the trace, the first three also act)
     retrieval_loop       `stall_limit` consecutive search steps with no new item and no Pareto gain
                          -> stop searching
@@ -59,6 +65,7 @@ from dataclasses import dataclass, field, replace
 
 from openai import AsyncOpenAI
 
+from evidence import navigator
 from evidence.audit import audit, pareto_improves, required_retrieve, risk
 from evidence.common import LLM_BASE_URL, LLM_MODEL, SEARCH_URL
 from evidence.derive import derive_answer, question_options
@@ -241,6 +248,8 @@ class Episode:
         self.n_search = self.n_llm = 0
         self.steps = []
         self.flags_seen = Counter()
+        self.use_navigator = getattr(args, "policy", "vne") == "navigator"
+        self.nav = Counter()                        # navigator outcomes: chosen / fallback / end
 
     def better(self, before, after, kind):
         """Did the step help? A search that DISCOVERS a conflicting value (Diversify / Challenge) also counts:
@@ -468,6 +477,37 @@ class Episode:
         self.steps.append(rec)
         return after
 
+    # ---- navigator policy
+    async def navigate(self, cert, acts):
+        """Navigator policy (see evidence.navigator): the frozen LLM picks the next action among the legal ones.
+
+        Returns (action, end, note). The action is None when nothing can be run: there is no candidate, or the
+        reply was unusable and the VNE fallback finds no positive value. end is True only when the model says so
+        and the certificate is complete."""
+        if not acts:
+            return None, False, None
+        system, user = navigator.build_prompt(self.question, self.state, cert, acts)
+        self.n_llm += 1
+        obj, err = await llm_json(self.client, self.args.model, system, user)
+        choice = navigator.parse_choice(obj, acts, cert.complete)
+        if err or choice["error"]:
+            self.nav["fallback"] += 1
+            best = max(acts, key=lambda a: a.vne)
+            return (best if best.vne > 0 else None), False, {"fallback": err or choice["error"]}
+        if choice["end"]:
+            self.nav["end"] += 1
+            return None, True, None
+        a = choice["action"]
+        self.nav["chosen"] += 1
+        note = {"weakness": navigator.weakness(a)}
+        if a.kind != "Verify":
+            merged = _unique(choice["queries"] + a.det, self.state.tried(a.oid))
+            if choice["queries"] and merged:
+                a.det, a.llm_mode = merged, None    # the model wrote the queries: no extra LLM query call
+                self.price(a)
+                note["queries"] = list(merged)
+        return a, False, note
+
     # ---- main loop
     async def run(self):
         S = self.state
@@ -480,14 +520,26 @@ class Episode:
                 stop = "stalled"
                 break
             acts = self.propose(cert, flags)
-            best = max(acts, key=lambda a: a.vne, default=None)
-            if best is None or best.vne <= 0:
-                stop = "certified" if cert.complete else ("no_positive_vne" if acts else "blocked")
-                break
+            note = None
+            if self.use_navigator:
+                best, end, note = await self.navigate(cert, acts)
+                if end:
+                    stop = "certified"
+                    break
+                if best is None:
+                    stop = "certified" if cert.complete else ("no_positive_vne" if acts else "blocked")
+                    break
+            else:
+                best = max(acts, key=lambda a: a.vne, default=None)
+                if best is None or best.vne <= 0:
+                    stop = "certified" if cert.complete else ("no_positive_vne" if acts else "blocked")
+                    break
             if self.n_search + best.n_search > self.args.max_searches:
                 stop = "budget"
                 break
             cert = await self.execute(best, step, cert)
+            if note:
+                self.steps[-1]["navigator"] = note
         if stop in ("stalled", "max_steps", "budget"):  # a last look at held passages before answering
             await self.sweep()
             cert = audit(S)
@@ -603,6 +655,7 @@ async def solve(client, args, prov, rec, W=None):
         "uncovered": uncovered, "pathologies": pathologies,
         "unknown_source_rate": unknown_rate(state),
         "searches": ep.n_search, "llm_calls": ep.n_llm,
+        "policy": "navigator" if ep.use_navigator else "vne", "navigator": dict(ep.nav),
         "action_stats": {k: {"success": s, "attempts": a} for k, (s, a) in ep.stats.items() if a},
         "steps": ep.steps, "bindings": vals, "conflicts": state.conflicts(), "n_items": len(state.items),
         "obligations": [{"id": o, "kind": state.obs[o]["kind"], "text": state.instantiate(o),
@@ -625,6 +678,8 @@ def show(r):
         print(f"  #{s['step']} {s['action']:9s} {s['oid']} vne={s['vne']:+.2f} (p={s['p']:.2f} gain={s['gain']:.2f} "
               f"cost={s['cost']:.2f}) {s['why']} | q={s['queries']} new={s['new']} "
               f"{'verify=' + s['verify'] if 'verify' in s else ''} improved={s['improved']} vec={s['vector']}")
+        if "navigator" in s:
+            print(f"     navigator: {s['navigator']}")
     for o in r["obligations"]:
         mark = "OK" if o["covered"] else ("--" if o["kind"] == "retrieve" else "dv")
         print(f"  [{mark}] {o['id']} k={o['kappa']} {o['text']}  {o['titles']}")
@@ -656,6 +711,10 @@ def summary(rs, model):
             acts[k] += v["attempts"]
             succ[k] += v["success"]
     print("actions (success/attempts):", {k: f"{succ[k]}/{acts[k]}" for k in acts})
+    nav = sum((Counter(r.get("navigator") or {}) for r in rs), Counter())
+    if nav:
+        print("navigator:", dict(nav), "(chosen = its choice was run, fallback = unusable reply or failed call so the "
+              "VNE choice was used, end = it ended a question whose certificate was complete)")
     print("questions flagged by the monitor:", dict(sum((Counter(r["pathologies"]) for r in rs), Counter())))
     rew = {}
     for r in rs:
@@ -697,6 +756,9 @@ async def main():
     ap.add_argument("--search-url", default=SEARCH_URL, help="Graph-R1 /search API (or EVIDENCE_SEARCH_URL)")
     ap.add_argument("--api-base", default=LLM_BASE_URL, help="LLM server (or EVIDENCE_LLM_BASE_URL)")
     ap.add_argument("--model", default=LLM_MODEL, help="LLM name (or EVIDENCE_LLM_MODEL)")
+    ap.add_argument("--policy", choices=("vne", "navigator"), default="vne",
+                    help="how the next action is chosen: the VNE rule (default) or a frozen-LLM Navigator "
+                         "(evidence.navigator) that chooses among the same legal actions")
     ap.add_argument("--abstain-uncertified", action="store_true",
                     help="empty answer when the certificate is not complete (default: answer anyway, flagged)")
     ap.add_argument("--no-det-compare", dest="det_compare", action="store_false",

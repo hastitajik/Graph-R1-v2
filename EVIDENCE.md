@@ -69,6 +69,14 @@ python3 -m unittest discover -s tests -t .
 Controller switches: `--disable Diversify,Verify`, `--no-learn-p` (p per question instead of carried over the run; with `--concurrency > 1` the learned p makes a run not bit-reproducible), `--risk-mode scalar`,
 `--no-det-compare`, `--abstain-uncertified`, weights `--w-gap --w-conflict --w-fragile --w-c-search ...`.
 
+Policy: `--policy navigator` replaces the VNE choice of the next action by a frozen-LLM Navigator
+(`evidence/navigator.py`), similar to the Navigator of Argus but without training. The model sees the evidence state
+(obligations, sources, conflicts, certificate status) and the legal candidate actions, names the weakness to fix
+(uncovered, corroborate, resolve), may write the search queries, and may say the evidence is sufficient. It only
+proposes: guards, audit and certificate are unchanged, `end` is honoured only when the certificate is complete, and an
+unusable reply or a failed call falls back to the VNE choice (counted as `fallback` in the trace). The default policy
+stays `vne`. `evidence.pipeline --navigator` runs it as an extra system next to the controller.
+
 ## What the report shows
 
 EM / F1, searches and LLM calls per system; for controller runs the share of certified answers, EM on certified

@@ -7,7 +7,8 @@ Steps (each is skipped when its output already exists, unless --force):
   1. provenance index   (python3 -m evidence.provenance build)
   2. obligations        (python3 -m evidence.obligations)            -> <out-dir>/obligations.jsonl
   3. controller         (python3 -m evidence.controller)             -> <out-dir>/trace_controller.jsonl
-  4. baseline           (python3 -m evidence.baseline --short)       -> <out-dir>/trace_baseline.jsonl
+     navigator          (only with --navigator; controller --policy navigator) -> <out-dir>/trace_navigator.jsonl
+  4. baseline          (python3 -m evidence.baseline --short)       -> <out-dir>/trace_baseline.jsonl
      closed-book        (only with --closed-book; baseline --no-search) -> <out-dir>/trace_closed_book.jsonl
   5. report             (python3 -m evidence.compare)                -> <out-dir>/report.md
   6. support graphs     (python3 -m evidence.export_graph)           -> <out-dir>/graphs/
@@ -85,6 +86,8 @@ def main():
     ap.add_argument("--api-base", default=LLM_BASE_URL)
     ap.add_argument("--model", default=LLM_MODEL)
     ap.add_argument("--skip-baseline", action="store_true")
+    ap.add_argument("--navigator", action="store_true",
+                    help="also run the controller with the frozen-LLM Navigator policy as an extra system")
     ap.add_argument("--closed-book", action="store_true",
                     help="also run the no-retrieval reference system (baseline --no-search) and add it to the report")
     ap.add_argument("--concurrency", type=int, default=3)
@@ -119,6 +122,8 @@ def main():
 
     runs = {}
     systems = {"controller": []}
+    if args.navigator:
+        systems["navigator"] = ["--policy", "navigator"]
     for name, extra in systems.items():
         trace = f"{out}/trace_{name}.jsonl"
         env = {}                                   # "--env K=V" pairs are environment switches, not controller flags

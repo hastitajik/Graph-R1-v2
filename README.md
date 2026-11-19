@@ -85,6 +85,10 @@ Add `--closed-book` to also run the no-retrieval reference system (the NaiveGene
 paper: the same model answers from its own knowledge, with no search). The report then shows, for each system that
 searches, how many of its right answers the model already had without evidence.
 
+Add `--navigator` to also run the controller with a frozen-LLM Navigator that picks the next action (similar to Argus,
+without training). It only proposes; the guards, the audit and the certificate decide, and the default VNE rule is
+used whenever the model's reply is unusable.
+
 Tests (no GPU, no network): `python3 -m unittest discover -s tests -t .`
 
 ## Repository map
