@@ -77,6 +77,26 @@ proposes: guards, audit and certificate are unchanged, `end` is honoured only wh
 unusable reply or a failed call falls back to the VNE choice (counted as `fallback` in the trace). The default policy
 stays `vne`. `evidence.pipeline --navigator` runs it as an extra system next to the controller.
 
+## Dynamic hypergraph
+
+`python3 -m evidence.dynamic_graph --trace <trace_controller.jsonl> --src expr/2WikiMultiHopQA --dst expr/2WikiMultiHopQA_dyn`
+adds the verified claims and their evidence to a COPY of the main hypergraph, so the system gets richer over time.
+A claim is a required retrieve obligation of a certified question, written with its values. It is stored the way
+Graph-R1 stores the hyperedges it extracts: a `<hyperedge>` node (role, weight, source chunks of its evidence), edges to
+the entities that already exist and are named in it, an entry in `kv_store_hyperedges.json` and one more vector in
+`index_hyperedge.bin`. The evidence articles of the claim are written to `provenance_index.json`, so a claim and the
+passage it restates are one source for the audit, never two. Retrieval is not changed: start the API on the copy with
+`python3 script_api.py --data_source 2WikiMultiHopQA_dyn` (it reads `expr/<data_source>`).
+
+- The base graph is never modified; the same trace can be added again without duplicating claims.
+- `--dry-run` counts what would be added without loading the embedding model.
+- A certified answer can still be wrong, and its claims are added too; the command prints how many claims come from
+  questions whose answer was wrong.
+- Measure the benefit on questions that are not in the trace (`evidence.pipeline --exclude`): the claims of a question
+  answer that question.
+- Needs a trace written by this version (the obligations carry their `support`), `networkx`, `faiss`, and
+  FlagEmbedding for the embeddings.
+
 ## What the report shows
 
 EM / F1, searches and LLM calls per system; for controller runs the share of certified answers, EM on certified

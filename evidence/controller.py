@@ -660,7 +660,8 @@ async def solve(client, args, prov, rec, W=None):
         "steps": ep.steps, "bindings": vals, "conflicts": state.conflicts(), "n_items": len(state.items),
         "obligations": [{"id": o, "kind": state.obs[o]["kind"], "text": state.instantiate(o),
                          "covered": state.covered(o), "kappa": state.kappa(o),
-                         "titles": sorted({t for k in state.live_support(o) for t in (state.items[k].titles or [UNKNOWN])})}
+                         "titles": sorted({t for k in state.live_support(o) for t in (state.items[k].titles or [UNKNOWN])}),
+                         "support": [state.items[k].text for k in state.live_support(o)]}
                         for o in state.order],
     }
 

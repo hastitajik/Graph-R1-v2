@@ -89,6 +89,9 @@ Add `--navigator` to also run the controller with a frozen-LLM Navigator that pi
 without training). It only proposes; the guards, the audit and the certificate decide, and the default VNE rule is
 used whenever the model's reply is unusable.
 
+`python3 -m evidence.dynamic_graph` adds the verified claims of certified questions to a copy of the hypergraph, in
+Graph-R1's own hyperedge format, so the graph grows with use; see [EVIDENCE.md](EVIDENCE.md#dynamic-hypergraph).
+
 Tests (no GPU, no network): `python3 -m unittest discover -s tests -t .`
 
 ## Repository map
