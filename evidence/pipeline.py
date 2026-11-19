@@ -8,6 +8,7 @@ Steps (each is skipped when its output already exists, unless --force):
   2. obligations        (python3 -m evidence.obligations)            -> <out-dir>/obligations.jsonl
   3. controller         (python3 -m evidence.controller)             -> <out-dir>/trace_controller.jsonl
   4. baseline           (python3 -m evidence.baseline --short)       -> <out-dir>/trace_baseline.jsonl
+     closed-book        (only with --closed-book; baseline --no-search) -> <out-dir>/trace_closed_book.jsonl
   5. report             (python3 -m evidence.compare)                -> <out-dir>/report.md
   6. support graphs     (python3 -m evidence.export_graph)           -> <out-dir>/graphs/
 
@@ -84,6 +85,8 @@ def main():
     ap.add_argument("--api-base", default=LLM_BASE_URL)
     ap.add_argument("--model", default=LLM_MODEL)
     ap.add_argument("--skip-baseline", action="store_true")
+    ap.add_argument("--closed-book", action="store_true",
+                    help="also run the no-retrieval reference system (baseline --no-search) and add it to the report")
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--force", action="store_true", help="recompute steps whose output exists")
     args = ap.parse_args()
@@ -133,8 +136,14 @@ def main():
             run(["evidence.baseline", "--obligations", obl, "--n", str(n), "--short",
                  "--concurrency", str(args.concurrency), "--out", trace] + srch + llm, f"{out}/log_baseline.txt", trace)
         runs["baseline"] = trace
+    if args.closed_book:
+        trace = f"{out}/trace_closed_book.jsonl"
+        if args.force or not done(trace):
+            run(["evidence.baseline", "--no-search", "--obligations", obl, "--n", str(n), "--short",
+                 "--concurrency", str(args.concurrency), "--out", trace] + llm, f"{out}/log_closed_book.txt", trace)
+        runs["closed_book"] = trace
 
-    cmp_cmd = ["evidence.compare", "--rejected", "--out", f"{out}/report.md"]
+    cmp_cmd =["evidence.compare", "--rejected", "--out", f"{out}/report.md"]
     for k, v in runs.items():
         cmp_cmd += ["--run", f"{k}={v}"]
     run(cmp_cmd, f"{out}/log_report.txt")

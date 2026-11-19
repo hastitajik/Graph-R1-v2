@@ -6,6 +6,11 @@ run with the same frozen LLM through the OpenAI-compatible chat endpoint. No RL-
 Run (project root):
   python3 -m evidence.baseline --obligations obligations_bonsai30.jsonl --n 30 \
       --search-url http://<ip>:8001/search --api-base http://<llm>/v1 --model <name> --out trace_base.jsonl
+
+With --no-search the same questions are answered from the model's own knowledge, with no retrieval at all
+(the NaiveGeneration system of the Graph-R1 paper). It needs no search API and its trace is marked
+"mode": "closed_book"; evidence.compare uses it to show how much of a retrieval system's accuracy the model
+already had without evidence.
 """
 import argparse
 import asyncio
@@ -40,6 +45,18 @@ Output format for answer:
 </answer>
 """
 SHORT = "\nKeep the text inside <answer> as short as possible (an entity, date, yes/no, or a few words), not a full sentence."
+CLOSED_INSTR = """Answer the given question from your own knowledge. No knowledge base is available and you cannot search.
+You must first conduct reasoning inside <think>...</think>, then output the final answer inside <answer>...</answer>.
+
+Output format:
+<think>
+...
+</think>
+<answer>
+...
+</answer>
+"""
+ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*(?:</answer>|$)", re.DOTALL)
 
 
 async def gen(client, args, msgs, stop):
@@ -56,7 +73,26 @@ async def gen(client, args, msgs, stop):
             await asyncio.sleep(3 * (attempt + 1))
 
 
+async def run_closed_book(client, args, rec):
+    """One call, no retrieval. The trace has no "grounded" field: there is no retrieved text to check against."""
+    msgs = [{"role": "user", "content": CLOSED_INSTR + "Question: " + rec["question"] + (SHORT if args.short else "")}]
+    answer, err, trail = "", None, []
+    try:
+        out = await gen(client, args, msgs, None)
+        trail.append(out)
+        m = ANSWER_RE.search(out)
+        answer = (m.group(1) if m else out).strip()
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"[:200]
+    gold = rec.get("gold") or []
+    em, f1 = em_f1(answer, gold)
+    return {"question": rec["question"], "gold": gold, "answer": answer, "em": em, "f1": f1, "mode": "closed_book",
+            "searches": 0, "turns": 1, "error": err, "search_errors": 0, "trail": trail}
+
+
 async def run_one(client, args, rec):
+    if getattr(args, "no_search", False):
+        return await run_closed_book(client, args, rec)
     msgs = [{"role": "user", "content": INSTR + "Question: " + rec["question"] + (SHORT if args.short else "")}]
     searches, turns, answer, err, trail, seen, search_errors = 0, 0, "", None, [], [], 0
     try:
@@ -64,7 +100,7 @@ async def run_one(client, args, rec):
             turns += 1
             out = await gen(client, args, msgs, ["</query>"])
             trail.append(out)
-            m = re.search(r"<answer>\s*(.*?)\s*(?:</answer>|$)", out, re.DOTALL)
+            m = ANSWER_RE.search(out)
             if m:
                 answer = m.group(1).strip()
                 break
@@ -85,7 +121,7 @@ async def run_one(client, args, rec):
             msgs.append({"role": "user", "content": "You must give your final answer now, inside <answer>...</answer>."})
             out = await gen(client, args, msgs, None)
             trail.append(out)
-            m = re.search(r"<answer>\s*(.*?)\s*(?:</answer>|$)", out, re.DOTALL)
+            m = ANSWER_RE.search(out)
             answer = (m.group(1) if m else out).strip()
     except Exception as e:
         err = f"{type(e).__name__}: {e}"[:200]
@@ -107,12 +143,14 @@ async def main():
     ap.add_argument("--info-chars", type=int, default=6000)
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--short", action="store_true", help="ask for a short answer (fairer EM)")
+    ap.add_argument("--no-search", action="store_true",
+                    help="closed-book reference: answer from the model's own knowledge, with no retrieval")
     ap.add_argument("--search-url", default=SEARCH_URL)
     ap.add_argument("--api-base", default=LLM_BASE_URL)
     ap.add_argument("--model", default=LLM_MODEL)
     ap.add_argument("--out", default="trace_base.jsonl")
     args = ap.parse_args()
-    if not args.search_url:
+    if not args.search_url and not args.no_search:
         ap.error("--search-url (or EVIDENCE_SEARCH_URL) is required")
     recs = [json.loads(l) for l in open(args.obligations, encoding="utf-8")]
     recs = [r for r in recs if r["ok"]][args.start: args.start + args.n]
@@ -134,13 +172,14 @@ async def main():
                   f"gold={r['gold'][:2]} | {r['question'][:60]}" + (f" !! {r['error']}" if r["error"] else ""))
     rs = [res[i] for i in sorted(res)]
     n = len(rs)
-    print(f"\n==== BASELINE {n} questions | model={args.model}")
+    print(f"\n==== {'CLOSED-BOOK' if args.no_search else 'BASELINE'} {n} questions | model={args.model}")
     print(f"EM={sum(r['em'] for r in rs)/n:.3f} F1={sum(r['f1'] for r in rs)/n:.3f} | "
           f"avg searches={sum(r['searches'] for r in rs)/n:.1f} avg turns={sum(r['turns'] for r in rs)/n:.1f}")
-    g = [r for r in rs if r["grounded"]]
-    u = [r for r in rs if not r["grounded"]]
-    print(f"answer string found in retrieved text: {len(g)}/{n} EM={sum(r['em'] for r in g)/max(len(g),1):.3f} | "
-          f"not found (yes/no, derived or from the model's own memory): {len(u)} EM={sum(r['em'] for r in u)/max(len(u),1):.3f}")
+    if not args.no_search:
+        g = [r for r in rs if r["grounded"]]
+        u = [r for r in rs if not r["grounded"]]
+        print(f"answer string found in retrieved text: {len(g)}/{n} EM={sum(r['em'] for r in g)/max(len(g),1):.3f} | "
+              f"not found (yes/no, derived or from the model's own memory): {len(u)} EM={sum(r['em'] for r in u)/max(len(u),1):.3f}")
     print(f"no answer: {sum(1 for r in rs if not r['answer'])} | errors: {sum(1 for r in rs if r['error'])}")
     failed = sum(1 for r in rs if r["error"]) + sum(r.get("search_errors", 0) for r in rs)
     if failed:   # same marker as the controller: the pipeline discards a run with failed calls

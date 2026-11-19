@@ -81,6 +81,10 @@ python3 -m evidence.pipeline --dataset datasets/2WikiMultiHopQA/raw/qa_test.json
 Outputs in `runs/main/`: `report.md` (EM/F1, certificate tables, paired tests), `trace_<system>.jsonl`,
 `graphs/` (support graph of each question).
 
+Add `--closed-book` to also run the no-retrieval reference system (the NaiveGeneration system of the Graph-R1
+paper: the same model answers from its own knowledge, with no search). The report then shows, for each system that
+searches, how many of its right answers the model already had without evidence.
+
 Tests (no GPU, no network): `python3 -m unittest discover -s tests -t .`
 
 ## Repository map

@@ -9,6 +9,8 @@ is a baseline run. Prints (and writes) a markdown report:
   * for controller runs: certified coverage, EM on certified / uncertified answers, and the selective EM
     (answer only certified questions; an abstained question counts as wrong) with its answered precision
   * per question: which systems got it right
+  * when one run is closed-book (its traces carry "mode": "closed_book", see evidence.baseline --no-search):
+    for every other run, how many right answers the model already had without any search
 """
 import argparse
 import json
@@ -61,17 +63,20 @@ def mcnemar_exact(b, c):
     return min(1.0, 2 * tail)
 
 
+def keyed_records(rs):
+    """Records keyed by (question, occurrence): a question that occurs twice is matched occurrence by occurrence."""
+    seen, out = {}, {}
+    for r in rs:
+        n = seen[r["question"]] = seen.get(r["question"], 0) + 1
+        out[(r["question"], n)] = r
+    return out
+
+
 def paired(ref, other, boots=2000, seed=0):
     """Per-question comparison on the questions both runs answered: wins / losses of `other` against `ref`,
     exact McNemar p and a bootstrap 95% interval of the EM difference (other - ref)."""
-    def keyed(rs):      # a question that occurs twice is matched occurrence by occurrence
-        seen, out = {}, {}
-        for r in rs:
-            n = seen[r["question"]] = seen.get(r["question"], 0) + 1
-            out[(r["question"], n)] = r["em"]
-        return out
-
-    a, b = keyed(ref), keyed(other)
+    a = {k: r["em"] for k, r in keyed_records(ref).items()}
+    b = {k: r["em"] for k, r in keyed_records(other).items()}
     pairs = [(a[k], b[k]) for k in b if k in a]
     if not pairs:
         return None
@@ -86,6 +91,43 @@ def paired(ref, other, boots=2000, seed=0):
 
 def fmt(x):
     return "-" if x is None or x != x else f"{x:.3f}" if isinstance(x, float) else str(x)
+
+
+def closed_book_section(runs):
+    """Lines of the model-knowledge section, or [] when no run is closed-book.
+
+    For each system that searches: a 2x2 table (closed-book right or wrong against the system right or wrong)
+    and how many of the system's right answers (and, for controller runs, of its certified right answers) the
+    model already had without any search."""
+    closed = [n for n, rs in runs.items() if rs and rs[0].get("mode") == "closed_book"]
+    if not closed:
+        return []
+    cb_name = closed[0]
+    cb = keyed_records(runs[cb_name])
+    right = lambda rec: rec["em"] >= 1
+    out = ["", f"## Model knowledge: `{cb_name}` (no search) against the systems that search", ""]
+    for name, rs in runs.items():
+        if name == cb_name:
+            continue
+        other = keyed_records(rs)
+        keys = [k for k in other if k in cb]
+        if not keys:
+            continue
+        rr =sum(1 for k in keys if right(cb[k]) and right(other[k]))
+        rw = sum(1 for k in keys if right(cb[k]) and not right(other[k]))
+        wr = sum(1 for k in keys if not right(cb[k]) and right(other[k]))
+        ww = len(keys) - rr - rw - wr
+        out += [f"### {name}", "", f"| | {name} right | {name} wrong |", "|---|---|---|",
+                f"| closed-book right | {rr} | {rw} |", f"| closed-book wrong | {wr} | {ww} |", "",
+                f"{name} is right on {rr + wr} of {len(keys)} questions; {rr} of those were already right without any search."]
+        if rs and "certified" in rs[0]:
+            cert = [k for k in keys if other[k].get("certified") and right(other[k])]
+            known = sum(1 for k in cert if right(cb[k]))
+            out.append(f"Certified and right: {len(cert)}; {known} of those were already right without any search.")
+        out.append("")
+    out.append("Closed-book shows what the model knows without evidence. It may have seen the source texts in training, "
+               "so it is not a measure of zero knowledge, and it must be measured again when the model changes.")
+    return out
 
 
 def report(runs, ref=None, rejected=False):
@@ -126,6 +168,7 @@ def report(runs, ref=None, rejected=False):
                 no = [r for r in rs if not f(r)]
                 out.append(f"| {n_} | {label} | {len(yes)}/{len(rs)} | {fmt(mean(r['em'] for r in yes))} | "
                            f"{fmt(mean(r['em'] for r in no))} |")
+    out += closed_book_section(runs)
     names = list(runs)
     ref = ref or names[0]
     if len(runs) > 1 and ref in runs:
